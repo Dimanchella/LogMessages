@@ -41,3 +41,4 @@ build/
 ### Data ###
 /inputData/
 /outputData/
+/statistic.txt
