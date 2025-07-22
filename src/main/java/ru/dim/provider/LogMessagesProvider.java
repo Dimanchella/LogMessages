@@ -1,6 +1,6 @@
 package ru.dim.provider;
 
-import lombok.NoArgsConstructor;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import ru.dim.dto.DataBunch;
 
@@ -18,23 +18,25 @@ import java.util.function.Consumer;
 import java.util.stream.Stream;
 
 @Slf4j
-@NoArgsConstructor
+@RequiredArgsConstructor
 public class LogMessagesProvider {
     static private final int MAX_LOG_FILE_NAME_LENGTH = 64;
     static private final String END_SUBSTRING = "...";
     static private final String UNRESOLVED_CHARACTERS_PATTERN = "[\\\\/:*?\"<>|]";
     static private final String LOG_FILE_TYPE = ".json";
-    static private final int BUNCH_LINES_SIZE = 10000;
+
+    private final boolean appendFiles;
 
     private long bunchNumber = 0;
 
-    public void executeTaskOnLogFile(String inputFilePath, Consumer<Stream<DataBunch>> executor) {
+
+    public void executeTaskOnLogFile(String inputFilePath, Consumer<Stream<DataBunch>> executor, long bunchSize) {
         try (BufferedReader bufferedReader = new BufferedReader(
                 new FileReader(inputFilePath, StandardCharsets.UTF_8)
         )) {
             executor.accept(
                     Stream
-                            .generate(() -> getDataBunch(++bunchNumber, bufferedReader))
+                            .generate(() -> getDataBunch(++bunchNumber, bufferedReader, bunchSize))
                             .takeWhile(Optional::isPresent)
                             .filter(Optional::isPresent)
                             .map(Optional::get)
@@ -44,7 +46,7 @@ public class LogMessagesProvider {
         }
     }
 
-    public Optional<DataBunch> getDataBunch(long bunchNumber, BufferedReader bufferedReader) {
+    public Optional<DataBunch> getDataBunch(long bunchNumber, BufferedReader bufferedReader, long bunchSize) {
         try {
             List<String> bunch = new ArrayList<>();
             String line = bufferedReader.readLine();
@@ -54,7 +56,8 @@ public class LogMessagesProvider {
             }
 
             log.info("Read new bunch № {}.", bunchNumber);
-            for (int i = 0; i < BUNCH_LINES_SIZE && line != null; i++) {
+            //for (int i = 0; i < BUNCH_SIZE && line != null; i++) {
+            for (int i = 0; i < bunchSize && line != null; i++) {
                 if (!line.isBlank()) {
                     bunch.add(line);
                 }
@@ -81,11 +84,11 @@ public class LogMessagesProvider {
         return fileName.toString();
     }
 
-    public void saveFile(String filePath, String text) {
+    public void saveTextInFile(String filePath, String text) {
         File file = new File(filePath);
         File path = file.getParentFile();
-        if (path.exists() || makeDirs(path)) {
-            try (BufferedWriter bufferedWriter = new BufferedWriter(new FileWriter(file, true))) {
+        if (path == null || path.exists() || makeDirs(path)) {
+            try (BufferedWriter bufferedWriter = new BufferedWriter(new FileWriter(file, appendFiles))) {
                 bufferedWriter.write(text);
                 bufferedWriter.newLine();
             } catch (IOException e) {
@@ -96,7 +99,33 @@ public class LogMessagesProvider {
         }
     }
 
+    public void saveTextListInFile(String filePath, List<String> textList) {
+        File file = new File(filePath);
+        File path = file.getParentFile();
+        if (path == null || path.exists() || makeDirs(path)) {
+            try (BufferedWriter bufferedWriter = new BufferedWriter(new FileWriter(file, appendFiles))) {
+                for (String log : textList) {
+                    bufferedWriter.write(log);
+                    bufferedWriter.newLine();
+                }
+            } catch (IOException e) {
+                log.error("Saving file error: ", e);
+            }
+        } else {
+            log.error("The creation of the directory \"{}\" failed.", path);
+        }
+    }
+
+    /* Повторение проверки на существование директории нужно для избежания повторного вызова метода mkdirs,
+     * в случае, если другой поток уже вызвал метод makeDirs и создал директорию.
+     * Первая проверка на существование директории нужна для исключения вызова синхронного метода makeDirs
+     * и остановки других потоков.
+     */
     public synchronized boolean makeDirs(File path) {
-        return path.exists() || path.mkdirs();
+        boolean result = path.mkdirs();
+        if (result) {
+            log.info("Directory {} is created.", path);
+        }
+        return path.exists() || result;
     }
 }

@@ -9,7 +9,10 @@ import ru.dim.dto.LogMessage;
 import ru.dim.provider.LogMessagesProvider;
 
 import java.io.File;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -23,13 +26,18 @@ public class LogMessagesService {
     private final LogMessagesProvider logMessagesProvider;
     private final ObjectMapper objectMapper;
 
-    public void processLogMessages(String inputFilePath, String outputDirectoryPath) {
+    public void processLogMessages(String inputFilePath, String outputDirectoryPath, long bunchSize) {
         Map<String, Map<String, Integer>> report = new ConcurrentHashMap<>();
         logMessagesProvider.executeTaskOnLogFile(
                 inputFilePath,
                 stream -> stream
                         .parallel()
-                        .forEach(subStream -> processLogStrings(subStream, report, outputDirectoryPath))
+                        .forEach(subStream -> processLogStrings(
+                                subStream,
+                                report,
+                                outputDirectoryPath)
+                        ),
+                bunchSize
         );
         saveReport(report, outputDirectoryPath);
     }
@@ -40,6 +48,8 @@ public class LogMessagesService {
             String outputDirectoryPath
     ) {
         log.info("Start processing bunch № {}.", data.getBunchNumber());
+        Map<String, Map<String, List<String>>> localReportList = new HashMap<>();
+
         data
                 .getDataLines()
                 .map(this::deserializeLogMessage)
@@ -47,8 +57,10 @@ public class LogMessagesService {
                 .map(Optional::get)
                 .forEach(logMessage -> {
                     countLogMessageToReport(logMessage, report);
-                    saveLog(logMessage, outputDirectoryPath);
+                    addLogMessageToReportList(logMessage, localReportList);
                 });
+        log.info("Save bunch № {}.", data.getBunchNumber());
+        saveReportList(localReportList, outputDirectoryPath);
         log.info("End bunch № {}.", data.getBunchNumber());
     }
 
@@ -72,30 +84,61 @@ public class LogMessagesService {
                 (clearMessages, newClearMessage) -> {
                     newClearMessage
                             .keySet()
-                            .forEach(msg -> clearMessages.merge(msg, newClearMessage.get(msg), Integer::sum));
+                            .forEach(message -> clearMessages.merge(
+                                    message,
+                                    newClearMessage.get(message),
+                                    Integer::sum
+                            ));
                     return clearMessages;
                 }
         );
         // log.info("<COUNT LOG> App: {}\t| Log: {}", logMessage.getApp(), logMessage.getMessage());
     }
 
-    private void saveLog(LogMessage logMessage, String outputDirectoryPath) {
+    private void addLogMessageToReportList(LogMessage logMessage, Map<String, Map<String, List<String>>> reportList) {
+        List<String> newLogList = new ArrayList<>();
         try {
-            logMessagesProvider.saveFile(
-                    logMessagesProvider.getSaveLogFilePath(
-                            outputDirectoryPath,
-                            logMessage.getApp(),
-                            logMessage.getMessage().replaceAll(STRING_PATTERN, "")
-                    ),
-                    objectMapper.writeValueAsString(logMessage)
-            );
-            // log.info("<SAVE LOG> App: {}\t| Clear log: {}", logMessage.getApp(), logMessage.getMessage());
+            newLogList.add(objectMapper.writeValueAsString(logMessage));
         } catch (JsonProcessingException e) {
             log.error("Json output parsing error: ", e);
+        }
+
+        String clearMessageText = logMessage.getMessage().replaceAll(STRING_PATTERN, "");
+        Map<String, List<String>> newClearMessageMap = new HashMap<>();
+        newClearMessageMap.put(clearMessageText, newLogList);
+
+        reportList.merge(
+                logMessage.getApp(),
+                newClearMessageMap,
+                (clearMessages, newClearMessage) -> {
+                    newClearMessage
+                            .keySet()
+                            .forEach(message -> clearMessages.merge(
+                                    message,
+                                    newClearMessage.get(message),
+                                    (logMessages, newLogMessage) -> {
+                                        logMessages.addAll(newLogMessage);
+                                        return logMessages;
+                                    }
+                            ));
+                    return clearMessages;
+                }
+        );
+    }
+
+    private void saveReportList(Map<String, Map<String, List<String>>> reportList, String outputDirectoryPath) {
+        for (String app : reportList.keySet()) {
+            for (String clearMessage : reportList.get(app).keySet()) {
+                logMessagesProvider.saveTextListInFile(
+                        logMessagesProvider.getSaveLogFilePath(outputDirectoryPath, app, clearMessage),
+                        reportList.get(app).get(clearMessage)
+                );
+            }
         }
     }
 
     private void saveReport(Map<String, Map<String, Integer>> report, String outputDirectoryPath) {
+        log.info("Save report");
         StringBuilder reportText = new StringBuilder();
         for (String app : report.keySet()) {
             reportText.append(app).append("\n");
@@ -104,10 +147,9 @@ public class LogMessagesService {
             }
             reportText.append("\n");
         }
-        logMessagesProvider.saveFile(
+        logMessagesProvider.saveTextInFile(
                 outputDirectoryPath + File.separator + REPORT_FILE_NAME,
                 reportText.toString()
         );
-        log.info("<SAVE REPORT>");
     }
 }
